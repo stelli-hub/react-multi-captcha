@@ -11,16 +11,38 @@ import { useScriptLoader } from "./hooks/useScriptLoader";
 import { getProvider } from "./providers";
 import type { CaptchaProps, CaptchaRef, RenderHandlers } from "./types";
 
+/** An in-flight `execute()` call awaiting a token, the abort, or a teardown. */
+interface PendingExecute {
+	resolve: (token: string) => void;
+	reject: (error: Error) => void;
+	cleanup: () => void;
+}
+
 export const Captcha = forwardRef<CaptchaRef, CaptchaProps>(function Captcha(
 	props,
 	ref,
 ) {
-	const { provider: providerName, language, className, style } = props;
+	const { provider: providerName, language, className, style, nonce } = props;
 
 	const containerRef = useRef<HTMLDivElement>(null);
 	const widgetIdRef = useRef<string | number | null>(null);
 	const responseRef = useRef<string | null>(null);
-	const resolveExecuteRef = useRef<((token: string) => void) | null>(null);
+	const pendingExecuteRef = useRef<PendingExecute | null>(null);
+
+	// Settle and clear any in-flight execute() promise. Called when a token
+	// arrives, when the caller aborts, when a newer execute() supersedes it, and
+	// from every teardown path so a pending promise can never hang forever.
+	const settlePendingExecute = useCallback(
+		(outcome: { token: string } | { error: Error }) => {
+			const pending = pendingExecuteRef.current;
+			if (!pending) return;
+			pendingExecuteRef.current = null;
+			pending.cleanup();
+			if ("token" in outcome) pending.resolve(outcome.token);
+			else pending.reject(outcome.error);
+		},
+		[],
+	);
 
 	const provider = getProvider(providerName);
 
@@ -32,16 +54,18 @@ export const Captcha = forwardRef<CaptchaRef, CaptchaProps>(function Captcha(
 	const onExpireRef = useLatestRef(props.onExpire);
 	const onLoadRef = useLatestRef(props.onLoad);
 
+	// Latest-ref the whole prop bag so the render effect can read the freshest
+	// config without listing the unstable `props` object as a dependency. The
+	// effect is still driven by `signature`, which changes only when a field the
+	// provider cares about changes.
+	const propsRef = useLatestRef(props);
+
 	const handlers = useMemo<RenderHandlers>(
 		() => ({
 			onVerify(token) {
 				responseRef.current = token;
 				onVerifyRef.current(token);
-				const resolver = resolveExecuteRef.current;
-				if (resolver) {
-					resolveExecuteRef.current = null;
-					resolver(token);
-				}
+				settlePendingExecute({ token });
 			},
 			onError(err) {
 				responseRef.current = null;
@@ -52,7 +76,7 @@ export const Captcha = forwardRef<CaptchaRef, CaptchaProps>(function Captcha(
 				onExpireRef.current?.();
 			},
 		}),
-		[onVerifyRef, onErrorRef, onExpireRef],
+		[onVerifyRef, onErrorRef, onExpireRef, settlePendingExecute],
 	);
 
 	const handleScriptLoad = useCallback(() => {
@@ -69,6 +93,7 @@ export const Captcha = forwardRef<CaptchaRef, CaptchaProps>(function Captcha(
 	const { isLoaded } = useScriptLoader({
 		provider,
 		language,
+		nonce,
 		onLoad: handleScriptLoad,
 		onError: handleScriptError,
 	});
@@ -87,47 +112,50 @@ export const Captcha = forwardRef<CaptchaRef, CaptchaProps>(function Captcha(
 	useEffect(() => {
 		if (!isLoaded || !containerRef.current) return;
 
-		// Tear down a stale widget if the signature changed mid-life. Changing
-		// siteKey / theme / size / language now actually rebuilds the widget
-		// instead of being silently ignored.
-		if (widgetIdRef.current !== null) {
-			try {
-				if (provider.remove) provider.remove(widgetIdRef.current);
-				else provider.reset(widgetIdRef.current);
-			} catch {
-				// ignore — best-effort cleanup
-			}
-			widgetIdRef.current = null;
-			responseRef.current = null;
-		}
-
+		// Render the widget. The id is captured in a local so the cleanup below
+		// always tears down *this* render's widget, even if a newer effect run has
+		// since replaced `widgetIdRef.current`.
+		let widgetId: string | number | null = null;
 		try {
-			const options = provider.buildOptions(props, handlers);
-			widgetIdRef.current = provider.render(containerRef.current, options);
+			const options = provider.buildOptions(propsRef.current, handlers);
+			widgetId = provider.render(containerRef.current, options);
+			widgetIdRef.current = widgetId;
 		} catch (err) {
 			onErrorRef.current?.(
 				err instanceof Error ? err : new Error(String(err)),
 			);
 		}
-		// `props` is intentionally accessed via the latest closure; rebuild is
-		// driven by `signature`, which encodes every scalar field of `props`.
-		// eslint-disable-next-line react-hooks/exhaustive-deps
-	}, [isLoaded, provider, signature, handlers]);
 
-	useEffect(() => {
+		// React runs this cleanup before each rebuild (signature change) and on
+		// unmount. Changing siteKey / theme / size / language therefore tears down
+		// the old widget and builds a fresh one instead of being silently ignored.
 		return () => {
-			if (widgetIdRef.current !== null) {
+			if (widgetId !== null) {
 				try {
-					if (provider.remove) provider.remove(widgetIdRef.current);
-					else provider.reset(widgetIdRef.current);
+					if (provider.remove) provider.remove(widgetId);
+					else provider.reset(widgetId);
 				} catch {
-					// ignore
+					// ignore — best-effort cleanup
 				}
-				widgetIdRef.current = null;
 			}
+			widgetIdRef.current = null;
 			responseRef.current = null;
+			// Never leave an awaited execute() hanging after its widget is gone.
+			settlePendingExecute({
+				error: new Error("Captcha widget was torn down before verification"),
+			});
 		};
-	}, [provider]);
+		// Rebuilds are driven by `signature` (every provider-relevant scalar field
+		// of `props`); the current prop bag is read through `propsRef`.
+	}, [
+		isLoaded,
+		provider,
+		signature,
+		handlers,
+		settlePendingExecute,
+		propsRef,
+		onErrorRef,
+	]);
 
 	useImperativeHandle(
 		ref,
@@ -136,6 +164,10 @@ export const Captcha = forwardRef<CaptchaRef, CaptchaProps>(function Captcha(
 				if (widgetIdRef.current !== null) {
 					provider.reset(widgetIdRef.current);
 					responseRef.current = null;
+					// A reset invalidates whatever an in-flight execute() was waiting on.
+					settlePendingExecute({
+						error: new Error("Captcha was reset before verification"),
+					});
 				}
 			},
 
@@ -154,25 +186,32 @@ export const Captcha = forwardRef<CaptchaRef, CaptchaProps>(function Captcha(
 						return;
 					}
 
-					let wrappedResolve: (token: string) => void;
+					// Supersede any earlier pending execute() so its promise can't
+					// hang forever once we overwrite the ref below.
+					settlePendingExecute({
+						error: new Error("execute() superseded by a newer call"),
+					});
+
+					const cleanup = () => {
+						if (signal && onAbort) signal.removeEventListener("abort", onAbort);
+					};
+
 					const onAbort = signal
 						? () => {
-								if (resolveExecuteRef.current === wrappedResolve) {
-									resolveExecuteRef.current = null;
+								if (pendingExecuteRef.current === pending) {
+									pendingExecuteRef.current = null;
 								}
+								cleanup();
 								reject(signal.reason ?? abortError());
 							}
 						: undefined;
 
-					wrappedResolve = (token: string) => {
-						if (signal && onAbort) signal.removeEventListener("abort", onAbort);
-						resolve(token);
-					};
+					const pending: PendingExecute = { resolve, reject, cleanup };
 
 					if (signal && onAbort) {
 						signal.addEventListener("abort", onAbort, { once: true });
 					}
-					resolveExecuteRef.current = wrappedResolve;
+					pendingExecuteRef.current = pending;
 
 					try {
 						provider.execute(
@@ -180,8 +219,10 @@ export const Captcha = forwardRef<CaptchaRef, CaptchaProps>(function Captcha(
 							containerRef.current ?? undefined,
 						);
 					} catch (err) {
-						if (signal && onAbort) signal.removeEventListener("abort", onAbort);
-						resolveExecuteRef.current = null;
+						if (pendingExecuteRef.current === pending) {
+							pendingExecuteRef.current = null;
+						}
+						cleanup();
 						reject(err instanceof Error ? err : new Error(String(err)));
 					}
 				});
@@ -194,7 +235,7 @@ export const Captcha = forwardRef<CaptchaRef, CaptchaProps>(function Captcha(
 				return responseRef.current;
 			},
 		}),
-		[provider],
+		[provider, settlePendingExecute],
 	);
 
 	return <div ref={containerRef} className={className} style={style} />;

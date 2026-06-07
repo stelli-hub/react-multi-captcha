@@ -5,6 +5,8 @@ import { useLatestRef } from "./useLatestRef";
 interface UseScriptLoaderOptions {
 	provider: ProviderConfig;
 	language?: string;
+	/** CSP nonce forwarded to the injected provider `<script>`. */
+	nonce?: string;
 	onLoad?: () => void;
 	onError?: (error: Error) => void;
 }
@@ -31,6 +33,7 @@ const injectedPreconnects = new Set<string>();
 export function useScriptLoader({
 	provider,
 	language,
+	nonce,
 	onLoad,
 	onError,
 }: UseScriptLoaderOptions): UseScriptLoaderResult {
@@ -72,7 +75,7 @@ export function useScriptLoader({
 		);
 
 		const inflight = loadingPromises.get(scriptId);
-		const promise = inflight ?? startLoad(provider, language);
+		const promise = inflight ?? startLoad(provider, language, nonce);
 		if (!inflight) {
 			loadingPromises.set(scriptId, promise);
 			promise.then(
@@ -92,7 +95,7 @@ export function useScriptLoader({
 		return () => {
 			cancelled = true;
 		};
-	}, [scriptId, provider, language, onLoadRef, onErrorRef]);
+	}, [scriptId, provider, language, nonce, onLoadRef, onErrorRef]);
 
 	return {
 		isLoaded: state.status === "ready",
@@ -103,6 +106,7 @@ export function useScriptLoader({
 function startLoad(
 	provider: ProviderConfig,
 	language: string | undefined,
+	nonce: string | undefined,
 ): Promise<void> {
 	const { scriptId, scriptUrl, globalVar, callbackName } = provider;
 
@@ -121,6 +125,20 @@ function startLoad(
 		const existing = document.getElementById(scriptId);
 		if (existing) {
 			// Another consumer already injected the tag; just wait for the global.
+			// Only trust an element we would have created ourselves — a <script>
+			// element pointing at the provider's own origin. Refusing anything else
+			// avoids being fooled into "loading complete" by an unrelated (or
+			// attacker-seeded) DOM node that happens to share our id.
+			if (!isTrustedProviderScript(existing, scriptUrl)) {
+				finalize(() =>
+					reject(
+						new Error(
+							`Refusing to trust element #${scriptId}: not the expected provider script`,
+						),
+					),
+				);
+				return;
+			}
 			pollForGlobal(
 				globalVar,
 				() => finalize(resolve),
@@ -145,6 +163,7 @@ function startLoad(
 		script.src = url.toString();
 		script.async = true;
 		script.defer = true;
+		if (nonce) script.nonce = nonce;
 
 		// Belt-and-suspenders: providers should hit the named global callback,
 		// but if that ever silently fails we'll still observe `onload`.
@@ -166,6 +185,24 @@ function startLoad(
 	});
 }
 
+function isTrustedProviderScript(
+	element: HTMLElement,
+	scriptUrl: string,
+): boolean {
+	if (!(element instanceof HTMLScriptElement)) return false;
+	try {
+		return new URL(element.src).origin === new URL(scriptUrl).origin;
+	} catch {
+		return false;
+	}
+}
+
+// Polls for the provider global after the (shared) script tag loads. This is a
+// process-wide, one-shot operation keyed by scriptId — it is intentionally NOT
+// tied to any single component's lifecycle. A consumer unmounting mid-load must
+// not cancel the poll, because sibling <Captcha> instances still depend on the
+// same global resolving. The hook's own `cancelled` flag already prevents stale
+// state updates into an unmounted component.
 function pollForGlobal(
 	globalVar: string,
 	ok: () => void,
