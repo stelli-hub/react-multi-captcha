@@ -56,15 +56,12 @@ function Form() {
   const captchaRef = useRef<CaptchaRef>(null);
 
   const handleSubmit = async () => {
-    // Get current response
-    const token = captchaRef.current?.getResponse();
+    // Get a single-use token. execute() never re-serves a token it already
+    // handed out, so calling it again for a second action (or a retry) mints
+    // a fresh one automatically — no manual reset() needed.
+    const token = await captchaRef.current?.execute();
 
-    if (!token) {
-      // Execute invisible captcha
-      const newToken = await captchaRef.current?.execute();
-    }
-
-    // Submit form...
+    // Submit form with `token`, then verify it server-side...
   };
 
   const handleReset = () => {
@@ -185,7 +182,7 @@ Only valid when `provider="hcaptcha"`. All optional.
 | Method | Type | Description |
 |--------|------|-------------|
 | `reset` | `() => void` | Reset the captcha widget |
-| `execute` | `(signal?: AbortSignal) => Promise<string>` | Execute the captcha (invisible reCAPTCHA/hCaptcha, or Turnstile `execution: "execute"`). Pass an `AbortSignal` to cancel — composes naturally with `AbortSignal.timeout(ms)`. |
+| `execute` | `(signal?: AbortSignal, options?: { forceChallenge?: boolean }) => Promise<string>` | Execute the captcha (invisible reCAPTCHA/hCaptcha, or Turnstile `execution: "execute"`). Returns a single-use token; a token already handed out by a prior `execute()` is never re-served — the next call auto-resets and mints a fresh one. Pass `{ forceChallenge: true }` to always mint fresh. Pass an `AbortSignal` to cancel — composes naturally with `AbortSignal.timeout(ms)`. |
 | `getResponse` | `() => string \| null` | Get the current response token |
 
 ### Behavior notes
@@ -193,6 +190,7 @@ Only valid when `provider="hcaptcha"`. All optional.
 - Callbacks are always invoked at their latest reference — you can pass inline arrows for `onVerify` / `onError` / `onExpire` without losing updates after the widget mounts.
 - Changing `siteKey`, `theme`, `size`, `language`, or any provider-specific render prop after mount tears down the widget and renders it fresh against the new config.
 - If the provider's script fails to load, the component still renders an empty container and reports the failure through `onError`. Remount or change props to retry — the failure is not cached.
+- Tokens are single-use. `execute()` enforces this: it returns an existing token only if that token hasn't already been delivered to an earlier `execute()` call; otherwise it resets the widget and runs a fresh challenge. Chained actions (signup → auto-login) and retries after a failed submit therefore each get their own token automatically. Use `execute(signal, { forceChallenge: true })` to force a brand-new token unconditionally.
 - `execute(signal?)` accepts an optional `AbortSignal`. Combine with `AbortSignal.timeout(ms)` to time out the verification:
 
   ```ts
