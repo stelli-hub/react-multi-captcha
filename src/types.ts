@@ -31,7 +31,15 @@ interface CaptchaPropsBase {
 	onLoad?: () => void;
 	/** Theme for the captcha widget */
 	theme?: CaptchaTheme;
-	/** Language code for the captcha (e.g., "en", "pt-BR") */
+	/**
+	 * Language code for the captcha (e.g., "en", "pt-BR").
+	 *
+	 * Note: reCAPTCHA and hCaptcha read the language from the script URL, which
+	 * is fetched once and cached process-wide. Changing `language` after the
+	 * script has loaded therefore has no effect for those providers (a full page
+	 * reload is required to switch). Turnstile reads it per-render, so it updates
+	 * live.
+	 */
 	language?: string;
 	/** Tab index for accessibility */
 	tabIndex?: number;
@@ -39,6 +47,13 @@ interface CaptchaPropsBase {
 	className?: string;
 	/** Inline styles for the container */
 	style?: CSSProperties;
+	/**
+	 * CSP nonce applied to the dynamically injected provider `<script>`.
+	 * Required when the host page enforces a strict `script-src 'nonce-…'`
+	 * policy, otherwise the provider script is blocked and the captcha
+	 * silently fails to load.
+	 */
+	nonce?: string;
 }
 
 export interface GoogleCaptchaProps extends CaptchaPropsBase {
@@ -87,6 +102,12 @@ export interface CaptchaRef {
 	/**
 	 * Execute the captcha (for invisible widgets or Turnstile `execution: "execute"`).
 	 * Pass an `AbortSignal` to cancel the pending verification.
+	 *
+	 * If a token already exists (the widget verified earlier and has not expired
+	 * or been reset), the returned promise resolves immediately with that cached
+	 * token rather than triggering a fresh challenge. Captcha tokens are
+	 * single-use: always verify them server-side and call `reset()` before
+	 * `execute()` when you need a brand-new token for a second action.
 	 */
 	execute: (signal?: AbortSignal) => Promise<string>;
 	/** Get the current response token, or null if not verified */
