@@ -103,13 +103,23 @@ export interface CaptchaRef {
 	 * Execute the captcha (for invisible widgets or Turnstile `execution: "execute"`).
 	 * Pass an `AbortSignal` to cancel the pending verification.
 	 *
-	 * If a token already exists (the widget verified earlier and has not expired
-	 * or been reset), the returned promise resolves immediately with that cached
-	 * token rather than triggering a fresh challenge. Captcha tokens are
-	 * single-use: always verify them server-side and call `reset()` before
-	 * `execute()` when you need a brand-new token for a second action.
+	 * Captcha tokens are single-use. `execute()` enforces this automatically: it
+	 * returns an existing token only if that token has not already been handed to
+	 * an earlier `execute()` call. Once a token has been delivered, the next
+	 * `execute()` resets the widget and runs a fresh challenge, so chained actions
+	 * (e.g. signup → auto-login, or retry after a failed submit) each get their own
+	 * token without any manual `reset()`. A freshly-solved-but-undelivered token
+	 * (e.g. a visible widget the user just solved) still resolves immediately.
+	 *
+	 * Pass `{ forceChallenge: true }` to always mint a brand-new token, discarding
+	 * any current one even on the first call.
+	 *
+	 * Always verify tokens server-side.
 	 */
-	execute: (signal?: AbortSignal) => Promise<string>;
+	execute: (
+		signal?: AbortSignal,
+		options?: { forceChallenge?: boolean },
+	) => Promise<string>;
 	/** Get the current response token, or null if not verified */
 	getResponse: () => string | null;
 }

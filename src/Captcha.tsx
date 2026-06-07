@@ -27,6 +27,12 @@ export const Captcha = forwardRef<CaptchaRef, CaptchaProps>(function Captcha(
 	const containerRef = useRef<HTMLDivElement>(null);
 	const widgetIdRef = useRef<string | number | null>(null);
 	const responseRef = useRef<string | null>(null);
+	// Whether the current `responseRef` token has already been handed to an
+	// execute() caller. Captcha tokens are single-use, so a token that's been
+	// delivered once must never be re-served — the next execute() mints a fresh
+	// one instead. A freshly-solved-but-undelivered token (e.g. a visible widget
+	// the user just solved) is still returned immediately.
+	const deliveredRef = useRef(false);
 	const pendingExecuteRef = useRef<PendingExecute | null>(null);
 
 	// Settle and clear any in-flight execute() promise. Called when a token
@@ -38,8 +44,11 @@ export const Captcha = forwardRef<CaptchaRef, CaptchaProps>(function Captcha(
 			if (!pending) return;
 			pendingExecuteRef.current = null;
 			pending.cleanup();
-			if ("token" in outcome) pending.resolve(outcome.token);
-			else pending.reject(outcome.error);
+			if ("token" in outcome) {
+				// Delivering a challenge-driven token to its execute() caller.
+				deliveredRef.current = true;
+				pending.resolve(outcome.token);
+			} else pending.reject(outcome.error);
 		},
 		[],
 	);
@@ -64,15 +73,18 @@ export const Captcha = forwardRef<CaptchaRef, CaptchaProps>(function Captcha(
 		() => ({
 			onVerify(token) {
 				responseRef.current = token;
+				deliveredRef.current = false;
 				onVerifyRef.current(token);
 				settlePendingExecute({ token });
 			},
 			onError(err) {
 				responseRef.current = null;
+				deliveredRef.current = false;
 				onErrorRef.current?.(err);
 			},
 			onExpire() {
 				responseRef.current = null;
+				deliveredRef.current = false;
 				onExpireRef.current?.();
 			},
 		}),
@@ -140,6 +152,7 @@ export const Captcha = forwardRef<CaptchaRef, CaptchaProps>(function Captcha(
 			}
 			widgetIdRef.current = null;
 			responseRef.current = null;
+			deliveredRef.current = false;
 			// Never leave an awaited execute() hanging after its widget is gone.
 			settlePendingExecute({
 				error: new Error("Captcha widget was torn down before verification"),
@@ -164,6 +177,7 @@ export const Captcha = forwardRef<CaptchaRef, CaptchaProps>(function Captcha(
 				if (widgetIdRef.current !== null) {
 					provider.reset(widgetIdRef.current);
 					responseRef.current = null;
+					deliveredRef.current = false;
 					// A reset invalidates whatever an in-flight execute() was waiting on.
 					settlePendingExecute({
 						error: new Error("Captcha was reset before verification"),
@@ -171,7 +185,7 @@ export const Captcha = forwardRef<CaptchaRef, CaptchaProps>(function Captcha(
 				}
 			},
 
-			execute(signal) {
+			execute(signal, options) {
 				return new Promise<string>((resolve, reject) => {
 					if (signal?.aborted) {
 						reject(signal.reason ?? abortError());
@@ -181,9 +195,26 @@ export const Captcha = forwardRef<CaptchaRef, CaptchaProps>(function Captcha(
 						reject(new Error("Captcha widget not initialized"));
 						return;
 					}
-					if (responseRef.current) {
+					// Return a token immediately only if it's never been handed out and
+					// the caller hasn't demanded a fresh challenge. Tokens are single-use,
+					// so a token we've already delivered must not be re-served.
+					if (
+						responseRef.current &&
+						!deliveredRef.current &&
+						!options?.forceChallenge
+					) {
+						deliveredRef.current = true;
 						resolve(responseRef.current);
 						return;
+					}
+
+					// A stale (already-delivered) or force-refreshed token is still held
+					// by the widget; reset it so the provider mints a brand-new one
+					// instead of re-returning the consumed value.
+					if (responseRef.current) {
+						provider.reset(widgetIdRef.current);
+						responseRef.current = null;
+						deliveredRef.current = false;
 					}
 
 					// Supersede any earlier pending execute() so its promise can't
