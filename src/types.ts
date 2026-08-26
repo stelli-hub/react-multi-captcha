@@ -196,5 +196,11 @@ export interface ProviderConfig {
 	execute: (widgetId: string | number, container?: HTMLElement) => void;
 	/** Fully unmount the widget. Falls back to `reset` if absent. */
 	remove?: (widgetId: string | number, container?: HTMLElement) => void;
+	/**
+	 * Whether the provider global is usable yet, polled by the script loader
+	 * while `globalVar` settles. Receives `undefined` while the global is still
+	 * absent. Defaults to `typeof api.render === "function"`.
+	 */
+	isReady?: (api: unknown) => boolean;
 	getResponse: (widgetId: string | number) => string | null;
 }

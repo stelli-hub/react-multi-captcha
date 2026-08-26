@@ -30,6 +30,10 @@ const loadedScripts = new Set<string>();
 const loadingPromises = new Map<string, Promise<void>>();
 const injectedPreconnects = new Set<string>();
 
+// `provider.callbackName` is a fixed constant; the counter keeps concurrent
+// loads of one provider off the same window key.
+let callbackSeq = 0;
+
 export function useScriptLoader({
 	provider,
 	language,
@@ -108,18 +112,19 @@ function startLoad(
 	language: string | undefined,
 	nonce: string | undefined,
 ): Promise<void> {
-	const { scriptId, scriptUrl, globalVar, callbackName } = provider;
+	const { scriptId, scriptUrl, callbackName } = provider;
 
 	return new Promise<void>((resolve, reject) => {
 		injectPreconnects(provider);
 
 		const w = window as unknown as Record<string, unknown>;
 		let settled = false;
+		// Settles the promise only — revoking the global callback here would
+		// strand the provider's own async init, which calls it later.
 		const finalize = (fn: () => void) => {
 			if (settled) return;
 			settled = true;
 			fn();
-			if (callbackName in w) delete w[callbackName];
 		};
 
 		const existing = document.getElementById(scriptId);
@@ -139,21 +144,28 @@ function startLoad(
 				);
 				return;
 			}
+			// No callback is registered on this path; the injecting load owns it.
 			pollForGlobal(
-				globalVar,
+				provider,
 				() => finalize(resolve),
 				(err) => finalize(() => reject(err)),
 			);
 			return;
 		}
 
-		w[callbackName] = () => finalize(resolve);
+		// The provider calls this after its own async init, a tick or more after
+		// `script.onload`; it self-consumes so no other path has to revoke it.
+		const name = `${callbackName}_${++callbackSeq}`;
+		w[name] = () => {
+			delete w[name];
+			finalize(resolve);
+		};
 
 		const script = document.createElement("script");
 		script.id = scriptId;
 
 		const url = new URL(scriptUrl);
-		url.searchParams.set("onload", callbackName);
+		url.searchParams.set("onload", name);
 		url.searchParams.set("render", "explicit");
 		const extra = provider.scriptUrlParams?.(language) ?? {};
 		for (const [k, v] of Object.entries(extra)) {
@@ -169,13 +181,18 @@ function startLoad(
 		// but if that ever silently fails we'll still observe `onload`.
 		script.onload = () => {
 			pollForGlobal(
-				globalVar,
+				provider,
 				() => finalize(resolve),
-				(err) => finalize(() => reject(err)),
+				(err) => {
+					delete w[name];
+					finalize(() => reject(err));
+				},
 			);
 		};
 
+		// Nothing will consume the callback once the script has failed.
 		script.onerror = () => {
+			delete w[name];
 			finalize(() =>
 				reject(new Error(`Failed to load captcha script: ${scriptId}`)),
 			);
@@ -204,13 +221,15 @@ function isTrustedProviderScript(
 // same global resolving. The hook's own `cancelled` flag already prevents stale
 // state updates into an unmounted component.
 function pollForGlobal(
-	globalVar: string,
+	provider: ProviderConfig,
 	ok: () => void,
 	fail: (err: Error) => void,
 ) {
+	const { globalVar } = provider;
 	const start = Date.now();
 	const tick = () => {
-		if (globalVar in window) {
+		const api = (window as unknown as Record<string, unknown>)[globalVar];
+		if (isApiReady(provider, api)) {
 			ok();
 			return;
 		}
@@ -221,6 +240,18 @@ function pollForGlobal(
 		setTimeout(tick, POLL_INTERVAL_MS);
 	};
 	tick();
+}
+
+// Providers assign the global as a stub during script evaluation and attach the
+// render API later, so presence is not readiness.
+function isApiReady(provider: ProviderConfig, api: unknown): boolean {
+	if (provider.isReady) return provider.isReady(api);
+	return (
+		typeof api === "object" &&
+		api !== null &&
+		"render" in api &&
+		typeof api.render === "function"
+	);
 }
 
 function injectPreconnects(provider: ProviderConfig) {
