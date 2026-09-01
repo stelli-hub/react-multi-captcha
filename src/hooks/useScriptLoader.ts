@@ -163,6 +163,7 @@ function startLoad(
 
 		const script = document.createElement("script");
 		script.id = scriptId;
+		if (provider.scriptCrossOrigin) script.crossOrigin = "anonymous";
 
 		const url = new URL(scriptUrl);
 		url.searchParams.set("onload", name);
@@ -208,7 +209,14 @@ function isTrustedProviderScript(
 ): boolean {
 	if (!(element instanceof HTMLScriptElement)) return false;
 	try {
-		return new URL(element.src).origin === new URL(scriptUrl).origin;
+		const actual = new URL(element.src);
+		const expected = new URL(scriptUrl);
+		// Same origin AND same path — query strings legitimately differ (each
+		// load carries its own ?onload= name), but a same-origin script served
+		// from a different path is not the provider script we meant to inject.
+		return (
+			actual.origin === expected.origin && actual.pathname === expected.pathname
+		);
 	} catch {
 		return false;
 	}

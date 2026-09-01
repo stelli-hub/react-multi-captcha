@@ -99,28 +99,37 @@ export type CaptchaProps =
 export interface CaptchaRef {
 	/** Reset the captcha widget */
 	reset: () => void;
-	/**
-	 * Execute the captcha (for invisible widgets or Turnstile `execution: "execute"`).
-	 * Pass an `AbortSignal` to cancel the pending verification.
-	 *
-	 * Captcha tokens are single-use. `execute()` enforces this automatically: it
-	 * returns an existing token only if that token has not already been handed to
-	 * an earlier `execute()` call. Once a token has been delivered, the next
-	 * `execute()` resets the widget and runs a fresh challenge, so chained actions
-	 * (e.g. signup → auto-login, or retry after a failed submit) each get their own
-	 * token without any manual `reset()`. A freshly-solved-but-undelivered token
-	 * (e.g. a visible widget the user just solved) still resolves immediately.
-	 *
-	 * Pass `{ forceChallenge: true }` to always mint a brand-new token, discarding
-	 * any current one even on the first call.
-	 *
-	 * Always verify tokens server-side.
-	 */
+		/**
+		 * Execute the captcha (for invisible widgets or Turnstile `execution: "execute"`).
+		 * Pass an `AbortSignal` to cancel the pending verification. Aborting rejects
+		 * with an `AbortError` and resets the widget, dismissing any visible
+		 * challenge and discarding its token.
+		 *
+		 * Captcha tokens are single-use. `execute()` enforces this automatically: it
+		 * returns an existing token only if that token has not already been handed to
+		 * an earlier `execute()` call. Once a token has been delivered, the next
+		 * `execute()` resets the widget and runs a fresh challenge, so chained actions
+		 * (e.g. signup → auto-login, or retry after a failed submit) each get their own
+		 * token without any manual `reset()`. A freshly-solved-but-undelivered token
+		 * (e.g. a visible widget the user just solved) still resolves immediately.
+		 *
+		 * Pass `{ forceChallenge: true }` to always mint a brand-new token, discarding
+		 * any current one even on the first call.
+		 *
+		 * Always verify tokens server-side.
+		 */
 	execute: (
 		signal?: AbortSignal,
 		options?: { forceChallenge?: boolean },
 	) => Promise<string>;
-	/** Get the current response token, or null if not verified */
+	/**
+	 * Get the current response token, or null if not verified.
+	 *
+	 * Once a token has been delivered to an `execute()` caller it is consumed
+	 * (captcha tokens are single-use) and this returns `null` until the widget
+	 * produces a fresh one. Solving a visible widget and reading it here without
+	 * ever calling `execute()` is unaffected.
+	 */
 	getResponse: () => string | null;
 }
 
@@ -178,6 +187,12 @@ export interface ProviderConfig {
 	scriptUrl: string;
 	globalVar: string;
 	callbackName: string;
+	/**
+	 * Set `crossOrigin="anonymous"` on the injected `<script>`. Only enable for
+	 * endpoints that serve CORS headers — an anonymous-mode fetch of a non-CORS
+	 * script fails to load.
+	 */
+	scriptCrossOrigin?: boolean;
 	preconnect?: ReadonlyArray<{ href: string; crossOrigin?: boolean }>;
 	scriptUrlParams?: (language?: string) => Record<string, string>;
 	/**

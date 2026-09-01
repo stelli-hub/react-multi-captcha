@@ -18,6 +18,34 @@ interface PendingExecute {
 	cleanup: () => void;
 }
 
+// Every prop the providers read at render time. Deliberately exhaustive over
+// CaptchaProps — adding a new render-relevant prop must extend this list or
+// changing it won't rebuild the widget.
+const SIGNATURE_KEYS = [
+	"provider",
+	"siteKey",
+	"theme",
+	"size",
+	"tabIndex",
+	"language",
+	"badge",
+	// hcaptcha
+	// (onChallengeExpired/onOpen/onClose are user callbacks — identity changes
+	// are picked up through the latest-ref wrappers, not rebuilds.)
+	// cloudflare
+	"action",
+	"cData",
+	"appearance",
+	"execution",
+	"retry",
+	"retryInterval",
+	"refreshExpired",
+	"refreshTimeout",
+	"responseField",
+	"responseFieldName",
+	"feedbackEnabled",
+] as const;
+
 export const Captcha = forwardRef<CaptchaRef, CaptchaProps>(function Captcha(
 	props,
 	ref,
@@ -110,27 +138,29 @@ export const Captcha = forwardRef<CaptchaRef, CaptchaProps>(function Captcha(
 		onError: handleScriptError,
 	});
 
-	// Signature of the render-time configuration. Strips functions and presentational
-	// fields (className/style) so the widget rebuilds only when something the
-	// underlying provider actually cares about changes.
+	// Signature of the render-time configuration. Built from an explicit list of
+	// the fields providers actually read, so functions and presentational props
+	// (className/style) never trigger a rebuild and the pick stays cheap even
+	// when consumers pass a fresh props object every render.
 	const signature = useMemo(() => {
-		return JSON.stringify(props, (key, value) => {
-			if (typeof value === "function") return undefined;
-			if (key === "className" || key === "style") return undefined;
-			return value;
-		});
+		const p = props as unknown as Record<string, unknown>;
+		const picked: Record<string, unknown> = {};
+		for (const key of SIGNATURE_KEYS) picked[key] = p[key];
+		return JSON.stringify(picked);
 	}, [props]);
 
 	useEffect(() => {
 		if (!isLoaded || !containerRef.current) return;
 
-		// Render the widget. The id is captured in a local so the cleanup below
-		// always tears down *this* render's widget, even if a newer effect run has
-		// since replaced `widgetIdRef.current`.
+		// Captured in locals so the cleanup below always tears down *this*
+		// render's widget, even if a newer effect run has since replaced the
+		// refs (and so the container is still available during unmount
+		// cleanup, after React has detached the ref).
+		const container = containerRef.current;
 		let widgetId: string | number | null = null;
 		try {
 			const options = provider.buildOptions(propsRef.current, handlers);
-			widgetId = provider.render(containerRef.current, options);
+			widgetId = provider.render(container, options);
 			widgetIdRef.current = widgetId;
 		} catch (err) {
 			onErrorRef.current?.(
@@ -144,7 +174,7 @@ export const Captcha = forwardRef<CaptchaRef, CaptchaProps>(function Captcha(
 		return () => {
 			if (widgetId !== null) {
 				try {
-					if (provider.remove) provider.remove(widgetId);
+					if (provider.remove) provider.remove(widgetId, container);
 					else provider.reset(widgetId);
 				} catch {
 					// ignore — best-effort cleanup
@@ -175,7 +205,11 @@ export const Captcha = forwardRef<CaptchaRef, CaptchaProps>(function Captcha(
 		() => ({
 			reset() {
 				if (widgetIdRef.current !== null) {
-					provider.reset(widgetIdRef.current);
+					try {
+						provider.reset(widgetIdRef.current);
+					} catch {
+						// ignore — best-effort cleanup, like the effect teardown
+					}
 					responseRef.current = null;
 					deliveredRef.current = false;
 					// A reset invalidates whatever an in-flight execute() was waiting on.
@@ -233,6 +267,18 @@ export const Captcha = forwardRef<CaptchaRef, CaptchaProps>(function Captcha(
 									pendingExecuteRef.current = null;
 								}
 								cleanup();
+								// Cancelling the wait also cancels the challenge: dismiss
+								// any visible prompt and drop the token so a late provider
+								// callback can't leave a stale value for the next execute().
+								if (widgetIdRef.current !== null) {
+									try {
+										provider.reset(widgetIdRef.current);
+									} catch {
+										// ignore — best-effort cleanup
+									}
+								}
+								responseRef.current = null;
+								deliveredRef.current = false;
 								reject(signal.reason ?? abortError());
 							}
 						: undefined;
@@ -260,6 +306,9 @@ export const Captcha = forwardRef<CaptchaRef, CaptchaProps>(function Captcha(
 			},
 
 			getResponse() {
+				// A token already delivered to an execute() caller is consumed
+				// (captcha tokens are single-use) and must not be handed out again.
+				if (deliveredRef.current) return null;
 				if (widgetIdRef.current !== null) {
 					return provider.getResponse(widgetIdRef.current);
 				}
