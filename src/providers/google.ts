@@ -37,6 +37,9 @@ export const googleProvider: ProviderConfig = {
 	scriptUrl: "https://www.google.com/recaptcha/api.js",
 	globalVar: "grecaptcha",
 	callbackName: "onRecaptchaLoad",
+	// api.js serves `access-control-allow-origin` echoing the requester, so an
+	// anonymous CORS fetch succeeds and hosts get richer script error reporting.
+	scriptCrossOrigin: true,
 	preconnect: [
 		{ href: "https://www.google.com" },
 		{ href: "https://www.gstatic.com", crossOrigin: true },
@@ -59,6 +62,21 @@ export const googleProvider: ProviderConfig = {
 		if (window.grecaptcha && typeof widgetId === "number") {
 			window.grecaptcha.reset(widgetId);
 		}
+	},
+
+	remove(widgetId, container) {
+		// reCAPTCHA v2 has no removal API and `reset()` leaves the widget's
+		// iframe in the container, so a later `render()` on the same element
+		// throws "already been rendered". Clearing the container is the only
+		// way to make re-renders (React StrictMode, signature changes) work.
+		if (window.grecaptcha && typeof widgetId === "number") {
+			try {
+				window.grecaptcha.reset(widgetId);
+			} catch {
+				// ignore — best-effort cleanup
+			}
+		}
+		if (container) container.innerHTML = "";
 	},
 
 	execute(widgetId) {

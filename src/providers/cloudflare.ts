@@ -57,6 +57,9 @@ export const cloudflareProvider: ProviderConfig = {
 	scriptUrl: "https://challenges.cloudflare.com/turnstile/v0/api.js",
 	globalVar: "turnstile",
 	callbackName: "onTurnstileLoad",
+	// api.js is served with `access-control-allow-origin: *`, including on the
+	// redirect it may issue.
+	scriptCrossOrigin: true,
 	preconnect: [{ href: "https://challenges.cloudflare.com" }],
 
 	scriptUrlParams() {

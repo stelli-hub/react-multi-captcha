@@ -41,6 +41,8 @@ export const hcaptchaProvider: ProviderConfig = {
 	scriptUrl: "https://js.hcaptcha.com/1/api.js",
 	globalVar: "hcaptcha",
 	callbackName: "onHcaptchaLoad",
+	// api.js is served with `access-control-allow-origin: *`.
+	scriptCrossOrigin: true,
 
 	buildOptions,
 

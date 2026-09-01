@@ -182,16 +182,17 @@ Only valid when `provider="hcaptcha"`. All optional.
 | Method | Type | Description |
 |--------|------|-------------|
 | `reset` | `() => void` | Reset the captcha widget |
-| `execute` | `(signal?: AbortSignal, options?: { forceChallenge?: boolean }) => Promise<string>` | Execute the captcha (invisible reCAPTCHA/hCaptcha, or Turnstile `execution: "execute"`). Returns a single-use token; a token already handed out by a prior `execute()` is never re-served — the next call auto-resets and mints a fresh one. Pass `{ forceChallenge: true }` to always mint fresh. Pass an `AbortSignal` to cancel — composes naturally with `AbortSignal.timeout(ms)`. |
-| `getResponse` | `() => string \| null` | Get the current response token |
+| `execute` | `(signal?: AbortSignal, options?: { forceChallenge?: boolean }) => Promise<string>` | Execute the captcha (invisible reCAPTCHA/hCaptcha, or Turnstile `execution: "execute"`). Returns a single-use token; a token already handed out by a prior `execute()` is never re-served — the next call auto-resets and mints a fresh one. Pass `{ forceChallenge: true }` to always mint fresh. Pass an `AbortSignal` to cancel — aborting rejects with an `AbortError` **and resets the widget**, dismissing any visible challenge and discarding its token. Composes naturally with `AbortSignal.timeout(ms)`. |
+| `getResponse` | `() => string \| null` | Get the current response token. Returns `null` once the current token has been delivered to an `execute()` caller (tokens are single-use); solving a visible widget and reading it here without `execute()` is unaffected. |
 
 ### Behavior notes
 
 - Callbacks are always invoked at their latest reference — you can pass inline arrows for `onVerify` / `onError` / `onExpire` without losing updates after the widget mounts.
 - Changing `siteKey`, `theme`, `size`, `language`, or any provider-specific render prop after mount tears down the widget and renders it fresh against the new config.
 - If the provider's script fails to load, the component still renders an empty container and reports the failure through `onError`. Remount or change props to retry — the failure is not cached.
+- The injected provider `<script>` uses `crossorigin="anonymous"` (all three provider endpoints serve CORS headers) for better error reporting, and adopts a pre-existing script tag only if it is a `<script>` from the provider's own origin and path. Pass `nonce` when your page enforces a strict `script-src 'nonce-…'` CSP.
 - Tokens are single-use. `execute()` enforces this: it returns an existing token only if that token hasn't already been delivered to an earlier `execute()` call; otherwise it resets the widget and runs a fresh challenge. Chained actions (signup → auto-login) and retries after a failed submit therefore each get their own token automatically. Use `execute(signal, { forceChallenge: true })` to force a brand-new token unconditionally.
-- `execute(signal?)` accepts an optional `AbortSignal`. Combine with `AbortSignal.timeout(ms)` to time out the verification:
+- `execute(signal?)` accepts an optional `AbortSignal`. Combine with `AbortSignal.timeout(ms)` to time out the verification. Aborting the wait also cancels the challenge itself: the widget is reset, any visible prompt is dismissed, and its (unused) token is discarded.
 
   ```ts
   const token = await ref.current?.execute(AbortSignal.timeout(10_000));
